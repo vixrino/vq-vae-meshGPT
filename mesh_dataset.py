@@ -1,0 +1,173 @@
+"""
+Dataset for loading 3D meshes (.obj) and converting them to triangle graphs.
+
+Each triangle becomes a graph node with features = 9D flattened vertex coordinates.
+Two triangles sharing an edge are connected in the graph.
+"""
+
+import os
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+import torch
+import trimesh
+from torch.utils.data import Dataset
+from torch_geometric.data import Data
+
+
+def load_mesh(path: str) -> trimesh.Trimesh:
+    """Load a mesh and ensure it's triangulated."""
+    mesh = trimesh.load(path, force="mesh", process=False)
+    return mesh
+
+
+def normalize_vertices(vertices: np.ndarray) -> np.ndarray:
+    """Center and scale vertices to fit in [-1, 1]."""
+    centroid = vertices.mean(axis=0)
+    vertices = vertices - centroid
+    scale = np.abs(vertices).max()
+    if scale > 0:
+        vertices = vertices / scale
+    return vertices
+
+
+def build_triangle_graph(mesh: trimesh.Trimesh) -> Data:
+    """
+    Convert a triangle mesh into a PyG graph.
+
+    Each triangle → one node with 9D features (3 vertices × 3 coords, flattened).
+    Two triangles sharing an edge → connected by an undirected edge in the graph.
+    """
+    vertices = normalize_vertices(mesh.vertices.copy())
+    faces = mesh.faces
+
+    num_triangles = len(faces)
+
+    node_features = vertices[faces].reshape(num_triangles, 9)
+
+    edge_to_triangles = defaultdict(list)
+    for tri_idx, face in enumerate(faces):
+        v0, v1, v2 = sorted(face)
+        edges = [
+            (v0, v1),
+            (v0, v2),
+            (v1, v2),
+        ]
+        for edge in edges:
+            edge_to_triangles[edge].append(tri_idx)
+
+    src, dst = [], []
+    for _edge, tri_indices in edge_to_triangles.items():
+        for i in range(len(tri_indices)):
+            for j in range(i + 1, len(tri_indices)):
+                src.append(tri_indices[i])
+                dst.append(tri_indices[j])
+                src.append(tri_indices[j])
+                dst.append(tri_indices[i])
+
+    if len(src) == 0:
+        edge_index = torch.zeros((2, 0), dtype=torch.long)
+    else:
+        edge_index = torch.tensor([src, dst], dtype=torch.long)
+
+    x = torch.tensor(node_features, dtype=torch.float32)
+
+    target_coords = x.clone()
+
+    return Data(
+        x=x,
+        edge_index=edge_index,
+        y=target_coords,
+        num_nodes=num_triangles,
+    )
+
+
+class MeshDataset(Dataset):
+    """
+    PyTorch dataset that loads .obj meshes from a directory
+    and returns PyG triangle graphs.
+
+    Supports flat directory or nested category directories:
+        data_dir/
+        ├── chair/
+        │   ├── model_001.obj
+        │   └── model_002.obj
+        └── table/
+            └── model_003.obj
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        max_faces: int = 800,
+        min_faces: int = 10,
+    ):
+        super().__init__()
+        self.data_dir = Path(data_dir)
+        self.max_faces = max_faces
+        self.min_faces = min_faces
+        self.file_paths = self._collect_obj_files()
+        print(f"Found {len(self.file_paths)} valid mesh files in {data_dir}")
+
+    def _collect_obj_files(self) -> list[str]:
+        paths = []
+        for root, _dirs, files in os.walk(self.data_dir):
+            for f in files:
+                if f.endswith(".obj"):
+                    paths.append(os.path.join(root, f))
+        return sorted(paths)
+
+    def __len__(self) -> int:
+        return len(self.file_paths)
+
+    def __getitem__(self, idx: int) -> Data | None:
+        path = self.file_paths[idx]
+        try:
+            mesh = load_mesh(path)
+
+            if len(mesh.faces) > self.max_faces or len(mesh.faces) < self.min_faces:
+                return None
+
+            graph = build_triangle_graph(mesh)
+            graph.mesh_path = path
+            return graph
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+            return None
+
+
+def collate_skip_none(batch: list) -> list:
+    """Collate function that filters out None entries."""
+    return [item for item in batch if item is not None]
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Usage: python mesh_dataset.py <path_to_obj_or_directory>")
+        sys.exit(1)
+
+    target = sys.argv[1]
+
+    if os.path.isfile(target):
+        mesh = load_mesh(target)
+        print(f"Mesh: {target}")
+        print(f"  Vertices: {len(mesh.vertices)}")
+        print(f"  Faces: {len(mesh.faces)}")
+        graph = build_triangle_graph(mesh)
+        print(f"  Graph nodes (triangles): {graph.num_nodes}")
+        print(f"  Graph edges: {graph.edge_index.shape[1]}")
+        print(f"  Node feature shape: {graph.x.shape}")
+        print(f"  Avg edges per node: {graph.edge_index.shape[1] / graph.num_nodes:.1f}")
+    else:
+        ds = MeshDataset(target)
+        print(f"\nDataset size: {len(ds)}")
+        if len(ds) > 0:
+            sample = ds[0]
+            if sample is not None:
+                print(f"Sample graph:")
+                print(f"  Nodes: {sample.num_nodes}")
+                print(f"  Edges: {sample.edge_index.shape[1]}")
+                print(f"  Features: {sample.x.shape}")
