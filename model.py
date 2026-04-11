@@ -28,9 +28,10 @@ class MeshVQVAE(nn.Module):
     def __init__(
         self,
         in_channels: int = 9,
-        latent_dim: int = 256,
+        latent_dim: int = 128,
         num_embeddings: int = 512,
-        commitment_cost: float = 0.25,
+        commitment_cost: float = 1.0,
+        diversity_weight: float = 0.1,
     ):
         super().__init__()
 
@@ -39,6 +40,7 @@ class MeshVQVAE(nn.Module):
             num_embeddings=num_embeddings,
             embedding_dim=latent_dim,
             commitment_cost=commitment_cost,
+            diversity_weight=diversity_weight,
         )
         self.decoder = MLPDecoder(latent_dim=latent_dim, out_channels=in_channels)
 
@@ -52,27 +54,21 @@ class MeshVQVAE(nn.Module):
             data: PyG Data with x [N, 9], edge_index [2, E], y [N, 9]
 
         Returns:
-            Dictionary with:
-                - recon: Reconstructed coordinates [N, 9]
-                - vq_loss: VQ objective scalar
-                - recon_loss: L1 reconstruction loss scalar
-                - total_loss: vq_loss + recon_loss
-                - indices: Codebook indices [N]
-                - z_e: Pre-quantization embeddings [N, D]
-                - z_q: Post-quantization embeddings [N, D]
+            Dictionary with all losses and intermediate representations.
         """
         z_e = self.encoder(data.x, data.edge_index)
-        z_q, vq_loss, indices = self.quantizer(z_e)
+        z_q, vq_losses, indices = self.quantizer(z_e)
         recon = self.decoder(z_q)
 
         recon_loss = F.l1_loss(recon, data.y)
 
-        total_loss = recon_loss + vq_loss
+        total_loss = recon_loss + vq_losses["total_vq_loss"]
 
         return {
             "recon": recon,
-            "vq_loss": vq_loss,
             "recon_loss": recon_loss,
+            "vq_loss": vq_losses["vq_loss"],
+            "diversity_loss": vq_losses["diversity_loss"],
             "total_loss": total_loss,
             "indices": indices,
             "z_e": z_e,
