@@ -16,12 +16,12 @@ class MLPDecoder(nn.Module):
     (3 vertices × 3 coordinates).
 
     Architecture:
-        Linear(256 → 256) + ReLU + LayerNorm
-        Linear(256 → 128) + ReLU + LayerNorm
-        Linear(128 → 9)   + Tanh (vertices are in [-1, 1])
+        Linear(latent → 256) + ReLU + LayerNorm
+        Linear(256 → 128)    + ReLU + LayerNorm
+        Linear(128 → 9)      + Tanh (vertices are in [-1, 1])
     """
 
-    def __init__(self, latent_dim: int = 256, out_channels: int = 9):
+    def __init__(self, latent_dim: int = 128, out_channels: int = 9):
         super().__init__()
 
         self.network = nn.Sequential(
