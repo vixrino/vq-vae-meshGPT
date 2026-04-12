@@ -219,6 +219,7 @@ def main():
         num_embeddings=saved_args.get("num_embeddings", 512),
         commitment_cost=saved_args.get("commitment_cost", 1.0),
         diversity_weight=saved_args.get("diversity_weight", 0.1),
+        consistency_weight=saved_args.get("consistency_weight", 1.0),
     ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])

@@ -3,6 +3,7 @@ Dataset for loading 3D meshes (.obj) and converting them to triangle graphs.
 
 Each triangle becomes a graph node with features = 9D flattened vertex coordinates.
 Two triangles sharing an edge are connected in the graph.
+Shared vertex pairs are tracked for the consistency loss.
 """
 
 import os
@@ -38,6 +39,10 @@ def build_triangle_graph(mesh: trimesh.Trimesh) -> Data:
 
     Each triangle → one node with 9D features (3 vertices × 3 coords, flattened).
     Two triangles sharing an edge → connected by an undirected edge in the graph.
+
+    Also builds shared_vertex_pairs: for each pair of triangles sharing a vertex,
+    records which local vertex index (0,1,2) in each triangle corresponds to
+    the same global vertex. Used for vertex consistency loss.
     """
     vertices = normalize_vertices(mesh.vertices.copy())
     faces = mesh.faces
@@ -71,16 +76,44 @@ def build_triangle_graph(mesh: trimesh.Trimesh) -> Data:
     else:
         edge_index = torch.tensor([src, dst], dtype=torch.long)
 
-    x = torch.tensor(node_features, dtype=torch.float32)
+    vertex_to_triangles = defaultdict(list)
+    for tri_idx, face in enumerate(faces):
+        for local_idx, global_vid in enumerate(face):
+            vertex_to_triangles[global_vid].append((tri_idx, local_idx))
 
+    sv_tri_a, sv_local_a, sv_tri_b, sv_local_b = [], [], [], []
+    for _vid, tri_local_list in vertex_to_triangles.items():
+        for i in range(len(tri_local_list)):
+            for j in range(i + 1, len(tri_local_list)):
+                ta, la = tri_local_list[i]
+                tb, lb = tri_local_list[j]
+                sv_tri_a.append(ta)
+                sv_local_a.append(la)
+                sv_tri_b.append(tb)
+                sv_local_b.append(lb)
+
+    x = torch.tensor(node_features, dtype=torch.float32)
     target_coords = x.clone()
 
-    return Data(
+    data = Data(
         x=x,
         edge_index=edge_index,
         y=target_coords,
         num_nodes=num_triangles,
     )
+
+    if len(sv_tri_a) > 0:
+        data.sv_tri_a = torch.tensor(sv_tri_a, dtype=torch.long)
+        data.sv_local_a = torch.tensor(sv_local_a, dtype=torch.long)
+        data.sv_tri_b = torch.tensor(sv_tri_b, dtype=torch.long)
+        data.sv_local_b = torch.tensor(sv_local_b, dtype=torch.long)
+    else:
+        data.sv_tri_a = torch.zeros(0, dtype=torch.long)
+        data.sv_local_a = torch.zeros(0, dtype=torch.long)
+        data.sv_tri_b = torch.zeros(0, dtype=torch.long)
+        data.sv_local_b = torch.zeros(0, dtype=torch.long)
+
+    return data
 
 
 class MeshDataset(Dataset):
@@ -160,6 +193,7 @@ if __name__ == "__main__":
         print(f"  Graph nodes (triangles): {graph.num_nodes}")
         print(f"  Graph edges: {graph.edge_index.shape[1]}")
         print(f"  Node feature shape: {graph.x.shape}")
+        print(f"  Shared vertex pairs: {len(graph.sv_tri_a)}")
         print(f"  Avg edges per node: {graph.edge_index.shape[1] / graph.num_nodes:.1f}")
     else:
         ds = MeshDataset(target)
@@ -171,3 +205,4 @@ if __name__ == "__main__":
                 print(f"  Nodes: {sample.num_nodes}")
                 print(f"  Edges: {sample.edge_index.shape[1]}")
                 print(f"  Features: {sample.x.shape}")
+                print(f"  Shared vertex pairs: {len(sample.sv_tri_a)}")

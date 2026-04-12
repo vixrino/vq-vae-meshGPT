@@ -33,7 +33,7 @@ def train_epoch(
     device: torch.device,
 ) -> dict[str, float]:
     model.train()
-    totals = {"recon_loss": 0.0, "vq_loss": 0.0, "diversity_loss": 0.0, "total_loss": 0.0, "codebook_usage": 0.0}
+    totals = {"recon_loss": 0.0, "vq_loss": 0.0, "diversity_loss": 0.0, "consistency_loss": 0.0, "total_loss": 0.0, "codebook_usage": 0.0}
     num_batches = 0
 
     for batch in loader:
@@ -52,6 +52,7 @@ def train_epoch(
         totals["recon_loss"] += out["recon_loss"].item()
         totals["vq_loss"] += out["vq_loss"].item()
         totals["diversity_loss"] += out["diversity_loss"].item()
+        totals["consistency_loss"] += out["consistency_loss"].item()
         totals["total_loss"] += out["total_loss"].item()
         totals["codebook_usage"] += model.quantizer.get_codebook_usage(out["indices"])
         num_batches += 1
@@ -69,7 +70,7 @@ def eval_epoch(
     device: torch.device,
 ) -> dict[str, float]:
     model.eval()
-    totals = {"recon_loss": 0.0, "vq_loss": 0.0, "diversity_loss": 0.0, "total_loss": 0.0, "codebook_usage": 0.0}
+    totals = {"recon_loss": 0.0, "vq_loss": 0.0, "diversity_loss": 0.0, "consistency_loss": 0.0, "total_loss": 0.0, "codebook_usage": 0.0}
     num_batches = 0
 
     for batch in loader:
@@ -82,6 +83,7 @@ def eval_epoch(
         totals["recon_loss"] += out["recon_loss"].item()
         totals["vq_loss"] += out["vq_loss"].item()
         totals["diversity_loss"] += out["diversity_loss"].item()
+        totals["consistency_loss"] += out["consistency_loss"].item()
         totals["total_loss"] += out["total_loss"].item()
         totals["codebook_usage"] += model.quantizer.get_codebook_usage(out["indices"])
         num_batches += 1
@@ -102,6 +104,7 @@ def main():
     parser.add_argument("--num_embeddings", type=int, default=512)
     parser.add_argument("--commitment_cost", type=float, default=1.0)
     parser.add_argument("--diversity_weight", type=float, default=0.1)
+    parser.add_argument("--consistency_weight", type=float, default=1.0)
     parser.add_argument("--max_faces", type=int, default=800)
     parser.add_argument("--val_split", type=float, default=0.1)
     parser.add_argument("--save_dir", type=str, default="checkpoints")
@@ -143,12 +146,14 @@ def main():
         num_embeddings=args.num_embeddings,
         commitment_cost=args.commitment_cost,
         diversity_weight=args.diversity_weight,
+        consistency_weight=args.consistency_weight,
     ).to(device)
 
     param_counts = model.count_parameters()
     print(f"Model parameters: {param_counts}")
     print(f"Config: latent_dim={args.latent_dim}, codebook={args.num_embeddings}, "
-          f"commitment={args.commitment_cost}, diversity={args.diversity_weight}")
+          f"commitment={args.commitment_cost}, diversity={args.diversity_weight}, "
+          f"consistency={args.consistency_weight}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -177,7 +182,7 @@ def main():
                 f"Train L={train_metrics['total_loss']:.4f} "
                 f"(recon={train_metrics['recon_loss']:.4f}, "
                 f"vq={train_metrics['vq_loss']:.4f}, "
-                f"div={train_metrics['diversity_loss']:.4f}) | "
+                f"cons={train_metrics['consistency_loss']:.4f}) | "
                 f"Val recon={val_metrics['recon_loss']:.4f} | "
                 f"CB={train_metrics['codebook_usage']:.1%} | "
                 f"LR={scheduler.get_last_lr()[0]:.2e} | "
