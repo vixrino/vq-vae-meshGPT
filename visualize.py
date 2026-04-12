@@ -1,0 +1,268 @@
+"""
+Visualization of VQ-VAE reconstruction quality.
+
+Side-by-side 3D plots of original vs reconstructed meshes,
+codebook usage histogram, and token assignment maps.
+"""
+
+import argparse
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+from mesh_dataset import MeshDataset, build_triangle_graph, load_mesh, normalize_vertices
+from model import MeshVQVAE
+
+
+def plot_triangles(ax, coords_9d: np.ndarray, title: str, color: str = "skyblue", token_indices: np.ndarray | None = None):
+    """
+    Plot triangles in 3D from 9D flattened coordinates.
+
+    Args:
+        ax: matplotlib 3D axis
+        coords_9d: [N, 9] array of triangle coordinates
+        title: plot title
+        color: face color (ignored if token_indices provided)
+        token_indices: optional [N] array of codebook indices for coloring
+    """
+    triangles = coords_9d.reshape(-1, 3, 3)
+
+    if token_indices is not None:
+        cmap = plt.cm.tab20
+        unique_tokens = np.unique(token_indices)
+        norm = plt.Normalize(vmin=unique_tokens.min(), vmax=unique_tokens.max())
+        face_colors = [cmap(norm(t)) for t in token_indices]
+    else:
+        face_colors = [color] * len(triangles)
+
+    poly = Poly3DCollection(triangles, alpha=0.7, linewidths=0.3, edgecolors="gray")
+    poly.set_facecolor(face_colors)
+    ax.add_collection3d(poly)
+
+    all_verts = triangles.reshape(-1, 3)
+    margin = 0.1
+    for i, label in enumerate(["X", "Y", "Z"]):
+        lo, hi = all_verts[:, i].min() - margin, all_verts[:, i].max() + margin
+        getattr(ax, f"set_{label.lower()}lim")(lo, hi)
+        getattr(ax, f"set_{label.lower()}label")(label)
+
+    ax.set_title(title, fontsize=11, fontweight="bold")
+
+
+@torch.no_grad()
+def visualize_reconstruction(
+    model: MeshVQVAE,
+    mesh_path: str,
+    device: torch.device,
+    save_path: str | None = None,
+):
+    """Plot original vs reconstructed mesh side by side."""
+    mesh = load_mesh(mesh_path)
+    graph = build_triangle_graph(mesh)
+    graph = graph.to(device)
+
+    out = model(graph)
+
+    original = graph.y.cpu().numpy()
+    reconstructed = out["recon"].cpu().numpy()
+    indices = out["indices"].cpu().numpy()
+
+    l1 = np.abs(original - reconstructed).mean()
+    unique_codes = len(np.unique(indices))
+
+    fig = plt.figure(figsize=(18, 6))
+
+    ax1 = fig.add_subplot(131, projection="3d")
+    plot_triangles(ax1, original, f"Original\n({len(original)} triangles)")
+
+    ax2 = fig.add_subplot(132, projection="3d")
+    plot_triangles(ax2, reconstructed, f"Reconstructed\nL1={l1:.4f}")
+
+    ax3 = fig.add_subplot(133, projection="3d")
+    plot_triangles(ax3, original, f"Token Map\n({unique_codes} unique codes)", token_indices=indices)
+
+    name = os.path.basename(mesh_path)
+    fig.suptitle(f"{name}", fontsize=13, y=1.02)
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"Saved: {save_path}")
+    else:
+        plt.show()
+
+    plt.close(fig)
+    return l1, unique_codes
+
+
+@torch.no_grad()
+def visualize_codebook_usage(
+    model: MeshVQVAE,
+    dataset: MeshDataset,
+    device: torch.device,
+    max_meshes: int = 100,
+    save_path: str | None = None,
+):
+    """Histogram of codebook usage across the dataset."""
+    all_indices = []
+
+    for i in range(min(len(dataset), max_meshes)):
+        graph = dataset[i]
+        if graph is None:
+            continue
+        graph = graph.to(device)
+        out = model(graph)
+        all_indices.append(out["indices"].cpu().numpy())
+
+    if not all_indices:
+        print("No valid meshes to visualize.")
+        return
+
+    all_idx = np.concatenate(all_indices)
+    num_codes = model.quantizer.num_embeddings
+
+    counts = np.bincount(all_idx, minlength=num_codes)
+    used = (counts > 0).sum()
+    dead = num_codes - used
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].bar(range(num_codes), counts, width=1.0, color="steelblue", alpha=0.8)
+    axes[0].set_xlabel("Code Index")
+    axes[0].set_ylabel("Usage Count")
+    axes[0].set_title(f"Codebook Usage ({used}/{num_codes} active, {dead} dead)")
+    axes[0].axhline(y=counts[counts > 0].mean(), color="red", linestyle="--", label=f"Mean={counts[counts > 0].mean():.0f}")
+    axes[0].legend()
+
+    sorted_counts = np.sort(counts[counts > 0])[::-1]
+    axes[1].bar(range(len(sorted_counts)), sorted_counts, width=1.0, color="coral", alpha=0.8)
+    axes[1].set_xlabel("Rank")
+    axes[1].set_ylabel("Usage Count")
+    axes[1].set_title("Usage Distribution (sorted)")
+    axes[1].set_yscale("log")
+
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"Saved: {save_path}")
+    else:
+        plt.show()
+
+    plt.close(fig)
+
+
+@torch.no_grad()
+def visualize_grid(
+    model: MeshVQVAE,
+    dataset: MeshDataset,
+    device: torch.device,
+    n_samples: int = 8,
+    save_path: str | None = None,
+):
+    """Grid of original vs reconstructed meshes."""
+    samples = []
+    for i in range(len(dataset)):
+        if len(samples) >= n_samples:
+            break
+        graph = dataset[i]
+        if graph is not None:
+            samples.append((dataset.file_paths[i], graph))
+
+    n = len(samples)
+    fig = plt.figure(figsize=(6 * 2, 4 * n))
+
+    for row, (path, graph) in enumerate(samples):
+        graph = graph.to(device)
+        out = model(graph)
+
+        original = graph.y.cpu().numpy()
+        reconstructed = out["recon"].cpu().numpy()
+        l1 = np.abs(original - reconstructed).mean()
+
+        ax1 = fig.add_subplot(n, 2, row * 2 + 1, projection="3d")
+        plot_triangles(ax1, original, f"Original: {os.path.basename(path)}")
+
+        ax2 = fig.add_subplot(n, 2, row * 2 + 2, projection="3d")
+        plot_triangles(ax2, reconstructed, f"Recon (L1={l1:.3f})", color="salmon")
+
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=120, bbox_inches="tight")
+        print(f"Saved: {save_path}")
+    else:
+        plt.show()
+
+    plt.close(fig)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Visualize VQ-VAE reconstructions")
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/best_model.pth")
+    parser.add_argument("--data_dir", type=str, default="data/shapenet")
+    parser.add_argument("--output_dir", type=str, default="visualizations")
+    parser.add_argument("--n_samples", type=int, default=8)
+    parser.add_argument("--max_faces", type=int, default=800)
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    saved_args = checkpoint.get("args", {})
+
+    model = MeshVQVAE(
+        latent_dim=saved_args.get("latent_dim", 128),
+        num_embeddings=saved_args.get("num_embeddings", 512),
+        commitment_cost=saved_args.get("commitment_cost", 1.0),
+        diversity_weight=saved_args.get("diversity_weight", 0.1),
+    ).to(device)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    print(f"Loaded model from epoch {checkpoint.get('epoch', '?')}, val_loss={checkpoint.get('val_loss', '?'):.4f}")
+
+    dataset = MeshDataset(args.data_dir, max_faces=args.max_faces)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    print("\n1/3 Generating reconstruction grid...")
+    visualize_grid(
+        model, dataset, device,
+        n_samples=args.n_samples,
+        save_path=os.path.join(args.output_dir, "reconstruction_grid.png"),
+    )
+
+    print("2/3 Generating codebook usage plot...")
+    visualize_codebook_usage(
+        model, dataset, device,
+        save_path=os.path.join(args.output_dir, "codebook_usage.png"),
+    )
+
+    print("3/3 Generating individual reconstruction plots...")
+    indiv_dir = os.path.join(args.output_dir, "individual")
+    os.makedirs(indiv_dir, exist_ok=True)
+
+    errors = []
+    for i in range(min(len(dataset), args.n_samples)):
+        path = dataset.file_paths[i]
+        graph = dataset[i]
+        if graph is None:
+            continue
+        l1, codes = visualize_reconstruction(
+            model, path, device,
+            save_path=os.path.join(indiv_dir, f"recon_{i:03d}.png"),
+        )
+        errors.append(l1)
+
+    if errors:
+        print(f"\nMean L1 across {len(errors)} samples: {np.mean(errors):.4f}")
+
+    print(f"\nAll visualizations saved to {args.output_dir}/")
+
+
+if __name__ == "__main__":
+    main()
