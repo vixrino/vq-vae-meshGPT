@@ -33,10 +33,7 @@ def train_epoch(
     device: torch.device,
 ) -> dict[str, float]:
     model.train()
-    total_recon = 0.0
-    total_vq = 0.0
-    total_loss = 0.0
-    total_usage = 0.0
+    totals = {"recon_loss": 0.0, "vq_loss": 0.0, "diversity_loss": 0.0, "total_loss": 0.0, "codebook_usage": 0.0}
     num_batches = 0
 
     for batch in loader:
@@ -52,21 +49,17 @@ def train_epoch(
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        total_recon += out["recon_loss"].item()
-        total_vq += out["vq_loss"].item()
-        total_loss += out["total_loss"].item()
-        total_usage += model.quantizer.get_codebook_usage(out["indices"])
+        totals["recon_loss"] += out["recon_loss"].item()
+        totals["vq_loss"] += out["vq_loss"].item()
+        totals["diversity_loss"] += out["diversity_loss"].item()
+        totals["total_loss"] += out["total_loss"].item()
+        totals["codebook_usage"] += model.quantizer.get_codebook_usage(out["indices"])
         num_batches += 1
 
     if num_batches == 0:
-        return {"recon_loss": 0, "vq_loss": 0, "total_loss": 0, "codebook_usage": 0}
+        return {k: 0.0 for k in totals}
 
-    return {
-        "recon_loss": total_recon / num_batches,
-        "vq_loss": total_vq / num_batches,
-        "total_loss": total_loss / num_batches,
-        "codebook_usage": total_usage / num_batches,
-    }
+    return {k: v / num_batches for k, v in totals.items()}
 
 
 @torch.no_grad()
@@ -76,10 +69,7 @@ def eval_epoch(
     device: torch.device,
 ) -> dict[str, float]:
     model.eval()
-    total_recon = 0.0
-    total_vq = 0.0
-    total_loss = 0.0
-    total_usage = 0.0
+    totals = {"recon_loss": 0.0, "vq_loss": 0.0, "diversity_loss": 0.0, "total_loss": 0.0, "codebook_usage": 0.0}
     num_batches = 0
 
     for batch in loader:
@@ -89,37 +79,34 @@ def eval_epoch(
         batch = batch.to(device)
         out = model(batch)
 
-        total_recon += out["recon_loss"].item()
-        total_vq += out["vq_loss"].item()
-        total_loss += out["total_loss"].item()
-        total_usage += model.quantizer.get_codebook_usage(out["indices"])
+        totals["recon_loss"] += out["recon_loss"].item()
+        totals["vq_loss"] += out["vq_loss"].item()
+        totals["diversity_loss"] += out["diversity_loss"].item()
+        totals["total_loss"] += out["total_loss"].item()
+        totals["codebook_usage"] += model.quantizer.get_codebook_usage(out["indices"])
         num_batches += 1
 
     if num_batches == 0:
-        return {"recon_loss": 0, "vq_loss": 0, "total_loss": 0, "codebook_usage": 0}
+        return {k: 0.0 for k in totals}
 
-    return {
-        "recon_loss": total_recon / num_batches,
-        "vq_loss": total_vq / num_batches,
-        "total_loss": total_loss / num_batches,
-        "codebook_usage": total_usage / num_batches,
-    }
+    return {k: v / num_batches for k, v in totals.items()}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train Mesh VQ-VAE")
     parser.add_argument("--data_dir", type=str, required=True, help="Path to .obj mesh directory")
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--latent_dim", type=int, default=256)
+    parser.add_argument("--latent_dim", type=int, default=128)
     parser.add_argument("--num_embeddings", type=int, default=512)
-    parser.add_argument("--commitment_cost", type=float, default=0.25)
+    parser.add_argument("--commitment_cost", type=float, default=1.0)
+    parser.add_argument("--diversity_weight", type=float, default=0.1)
     parser.add_argument("--max_faces", type=int, default=800)
     parser.add_argument("--val_split", type=float, default=0.1)
     parser.add_argument("--save_dir", type=str, default="checkpoints")
-    parser.add_argument("--log_every", type=int, default=1)
-    parser.add_argument("--save_every", type=int, default=10)
+    parser.add_argument("--log_every", type=int, default=5)
+    parser.add_argument("--save_every", type=int, default=20)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -155,12 +142,15 @@ def main():
         latent_dim=args.latent_dim,
         num_embeddings=args.num_embeddings,
         commitment_cost=args.commitment_cost,
+        diversity_weight=args.diversity_weight,
     ).to(device)
 
     param_counts = model.count_parameters()
     print(f"Model parameters: {param_counts}")
+    print(f"Config: latent_dim={args.latent_dim}, codebook={args.num_embeddings}, "
+          f"commitment={args.commitment_cost}, diversity={args.diversity_weight}")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=1e-6
     )
@@ -169,7 +159,7 @@ def main():
     best_val_loss = float("inf")
 
     print(f"\nStarting training for {args.epochs} epochs...")
-    print("-" * 80)
+    print("-" * 100)
 
     for epoch in tqdm(range(1, args.epochs + 1), desc="Training"):
         t0 = time.time()
@@ -181,14 +171,15 @@ def main():
 
         elapsed = time.time() - t0
 
-        if epoch % args.log_every == 0:
+        if epoch % args.log_every == 0 or epoch == 1:
             print(
                 f"Epoch {epoch:4d} | "
                 f"Train L={train_metrics['total_loss']:.4f} "
-                f"(recon={train_metrics['recon_loss']:.4f}, vq={train_metrics['vq_loss']:.4f}) | "
-                f"Val L={val_metrics['total_loss']:.4f} "
-                f"(recon={val_metrics['recon_loss']:.4f}) | "
-                f"CB usage={train_metrics['codebook_usage']:.1%} | "
+                f"(recon={train_metrics['recon_loss']:.4f}, "
+                f"vq={train_metrics['vq_loss']:.4f}, "
+                f"div={train_metrics['diversity_loss']:.4f}) | "
+                f"Val recon={val_metrics['recon_loss']:.4f} | "
+                f"CB={train_metrics['codebook_usage']:.1%} | "
                 f"LR={scheduler.get_last_lr()[0]:.2e} | "
                 f"{elapsed:.1f}s"
             )
@@ -218,7 +209,7 @@ def main():
                 os.path.join(args.save_dir, f"model_epoch_{epoch}.pth"),
             )
 
-    print("-" * 80)
+    print("-" * 100)
     print(f"Training complete. Best val loss: {best_val_loss:.4f}")
     print(f"Best model saved to {args.save_dir}/best_model.pth")
 
