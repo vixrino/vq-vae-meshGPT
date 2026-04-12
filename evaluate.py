@@ -138,9 +138,10 @@ def main():
     saved_args = checkpoint.get("args", {})
 
     model = MeshVQVAE(
-        latent_dim=saved_args.get("latent_dim", 256),
+        latent_dim=saved_args.get("latent_dim", 128),
         num_embeddings=saved_args.get("num_embeddings", 512),
-        commitment_cost=saved_args.get("commitment_cost", 0.25),
+        commitment_cost=saved_args.get("commitment_cost", 1.0),
+        diversity_weight=saved_args.get("diversity_weight", 0.1),
     ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])
