@@ -84,7 +84,7 @@ class MeshVQVAE(nn.Module):
 
         recon_loss = self._cyclic_permutation_loss(recon, data.y)
         cons_loss = self._vertex_consistency_loss(recon, data)
-        total_loss = recon_loss + vq_losses["vq_loss"] + 0.1 * cons_loss
+        total_loss = recon_loss + vq_losses["vq_loss"] + 0.3 * cons_loss
 
         return {
             "recon": recon,
