@@ -85,6 +85,34 @@ python evaluate.py --checkpoint checkpoints/best_model.pth --data_dir data/shape
 - **VQ**: Standard VQ with EMA codebook updates and commitment loss (beta=0.25). Codebook size 512, dimension 256.
 - **Decoder**: Simple MLP since we decode per-triangle independently (the graph structure is already captured in the quantized embeddings).
 
+## Results
+
+Trained on 425 low-poly meshes across 8 categories for 300 epochs
+(30 epoch autoencoder warmup + 270 epoch VQ phase).
+
+![Per-category reconstructions](visualizations/per_category.png)
+
+Stitched reconstruction L1 per category (20 meshes each, mean over all categories = **0.099**):
+
+| Category   | Stitched L1 |
+|------------|------------:|
+| icosphere  |       0.034 |
+| torus      |       0.036 |
+| sphere     |       0.052 |
+| capsule    |       0.082 |
+| cylinder   |       0.100 |
+| cone       |       0.127 |
+| deformed   |       0.146 |
+| box        |       0.218 |
+| **Mean**   |   **0.099** |
+
+Shapes with repetitive local geometry (torus, icosphere, sphere) compress
+well and reconstruct with very low error. Irregular low-poly meshes with
+no motif repetition (boxes) are the hardest case.
+
+See [RESULTS.md](RESULTS.md) for the full breakdown including raw L1 and
+token-reuse statistics.
+
 ## References
 
 - [MeshGPT: Generating Triangle Meshes with Decoder-Only Transformers](https://nihalsid.github.io/mesh-gpt/)
