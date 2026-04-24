@@ -99,10 +99,11 @@ def visualize_reconstruction(
     raw_recon = out["recon"].cpu().numpy()
     stitched_recon = stitch_vertices(raw_recon, faces)
     indices = out["indices"].cpu().numpy()
+    level0_indices = indices[:, 0] if indices.ndim == 2 else indices
 
     raw_l1 = np.abs(original - raw_recon).mean()
     stitched_l1 = np.abs(original - stitched_recon).mean()
-    unique_codes = len(np.unique(indices))
+    unique_codes = len(np.unique(level0_indices))
 
     fig = plt.figure(figsize=(24, 6))
 
@@ -116,7 +117,7 @@ def visualize_reconstruction(
     plot_triangles(ax3, stitched_recon, f"Stitched Recon\nL1={stitched_l1:.4f}", color="lightgreen")
 
     ax4 = fig.add_subplot(144, projection="3d")
-    plot_triangles(ax4, original, f"Token Map\n({unique_codes} unique codes)", token_indices=indices)
+    plot_triangles(ax4, original, f"Token Map (level 0)\n({unique_codes} unique codes)", token_indices=level0_indices)
 
     name = os.path.basename(mesh_path)
     fig.suptitle(f"{name}", fontsize=13, y=1.02)
@@ -149,34 +150,41 @@ def visualize_codebook_usage(
             continue
         graph = graph.to(device)
         out = model(graph)
-        all_indices.append(out["indices"].cpu().numpy())
+        idx = out["indices"].cpu().numpy()
+        if idx.ndim == 1:
+            idx = idx[:, None]
+        all_indices.append(idx)
 
     if not all_indices:
         print("No valid meshes to visualize.")
         return
 
-    all_idx = np.concatenate(all_indices)
+    all_idx = np.concatenate(all_indices, axis=0)
     num_codes = model.quantizer.num_embeddings
+    num_levels = all_idx.shape[1]
 
-    counts = np.bincount(all_idx, minlength=num_codes)
-    used = (counts > 0).sum()
-    dead = num_codes - used
+    fig, axes = plt.subplots(num_levels, 2, figsize=(14, 4 * num_levels), squeeze=False)
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    for level in range(num_levels):
+        counts = np.bincount(all_idx[:, level], minlength=num_codes)
+        used = (counts > 0).sum()
+        dead = num_codes - used
 
-    axes[0].bar(range(num_codes), counts, width=1.0, color="steelblue", alpha=0.8)
-    axes[0].set_xlabel("Code Index")
-    axes[0].set_ylabel("Usage Count")
-    axes[0].set_title(f"Codebook Usage ({used}/{num_codes} active, {dead} dead)")
-    axes[0].axhline(y=counts[counts > 0].mean(), color="red", linestyle="--", label=f"Mean={counts[counts > 0].mean():.0f}")
-    axes[0].legend()
+        axes[level, 0].bar(range(num_codes), counts, width=1.0, color="steelblue", alpha=0.8)
+        axes[level, 0].set_xlabel("Code Index")
+        axes[level, 0].set_ylabel("Usage Count")
+        axes[level, 0].set_title(f"Level {level}: {used}/{num_codes} active, {dead} dead")
+        active_counts = counts[counts > 0]
+        if len(active_counts) > 0:
+            axes[level, 0].axhline(y=active_counts.mean(), color="red", linestyle="--", label=f"Mean={active_counts.mean():.0f}")
+            axes[level, 0].legend()
 
-    sorted_counts = np.sort(counts[counts > 0])[::-1]
-    axes[1].bar(range(len(sorted_counts)), sorted_counts, width=1.0, color="coral", alpha=0.8)
-    axes[1].set_xlabel("Rank")
-    axes[1].set_ylabel("Usage Count")
-    axes[1].set_title("Usage Distribution (sorted)")
-    axes[1].set_yscale("log")
+            sorted_counts = np.sort(active_counts)[::-1]
+            axes[level, 1].bar(range(len(sorted_counts)), sorted_counts, width=1.0, color="coral", alpha=0.8)
+            axes[level, 1].set_xlabel("Rank")
+            axes[level, 1].set_ylabel("Usage Count")
+            axes[level, 1].set_title(f"Level {level} distribution (sorted)")
+            axes[level, 1].set_yscale("log")
 
     plt.tight_layout()
 
@@ -253,6 +261,7 @@ def main():
     model = MeshVQVAE(
         latent_dim=saved_args.get("latent_dim", 128),
         num_embeddings=saved_args.get("num_embeddings", 512),
+        num_vq_levels=saved_args.get("num_vq_levels", 1),
         commitment_cost=saved_args.get("commitment_cost", 0.25),
         warmup_epochs=0,
     ).to(device)

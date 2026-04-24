@@ -8,6 +8,9 @@ and VQ is activated.
 
 Uses GNN decoder (mirror of encoder) so neighboring triangles
 coordinate their vertex predictions via message passing.
+
+Quantizer is a Residual VQ (RVQ) with num_vq_levels levels.
+Setting num_vq_levels=1 recovers plain VQ.
 """
 
 import torch
@@ -17,7 +20,7 @@ from torch_geometric.data import Data
 
 from decoder import GraphDecoder
 from encoder import GraphEncoder
-from vector_quantizer import VectorQuantizer
+from residual_vector_quantizer import ResidualVectorQuantizer
 
 
 class MeshVQVAE(nn.Module):
@@ -27,6 +30,7 @@ class MeshVQVAE(nn.Module):
         in_channels: int = 9,
         latent_dim: int = 128,
         num_embeddings: int = 512,
+        num_vq_levels: int = 3,
         commitment_cost: float = 0.25,
         warmup_epochs: int = 30,
     ):
@@ -36,7 +40,8 @@ class MeshVQVAE(nn.Module):
         self.current_epoch = 0
 
         self.encoder = GraphEncoder(in_channels=in_channels, latent_dim=latent_dim)
-        self.quantizer = VectorQuantizer(
+        self.quantizer = ResidualVectorQuantizer(
+            num_levels=num_vq_levels,
             num_embeddings=num_embeddings,
             embedding_dim=latent_dim,
             commitment_cost=commitment_cost,
@@ -103,7 +108,7 @@ class MeshVQVAE(nn.Module):
         return indices, z_e
 
     def decode_from_indices(self, indices: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        z_q = self.quantizer.embedding(indices)
+        z_q = self.quantizer.lookup(indices)
         return self.decoder(z_q, edge_index)
 
     def count_parameters(self) -> dict[str, int]:

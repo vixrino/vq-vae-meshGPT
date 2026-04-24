@@ -38,7 +38,8 @@ def evaluate_mesh(
     l2_error = np.sqrt(((original - stitched) ** 2).sum(axis=1)).mean()
 
     indices = out["indices"].cpu()
-    unique_codes = torch.unique(indices).shape[0]
+    # indices may be [N] (plain VQ) or [N, num_levels] (RVQ)
+    unique_codes = torch.unique(indices.reshape(-1)).shape[0]
 
     return {
         "mesh_path": mesh_path,
@@ -46,7 +47,7 @@ def evaluate_mesh(
         "l1_error": float(l1_error),
         "l2_error": float(l2_error),
         "num_unique_codes": int(unique_codes),
-        "total_codes_used": int(len(indices)),
+        "total_codes_used": int(indices.numel()),
         "original": original,
         "reconstructed": stitched,
         "indices": indices.numpy(),
@@ -101,22 +102,25 @@ def export_reconstructed_obj(
 
 def print_codebook_stats(model: MeshVQVAE, all_indices: list[np.ndarray]) -> None:
     """Print codebook usage statistics across the evaluation set."""
-    all_idx = np.concatenate(all_indices)
-    unique, counts = np.unique(all_idx, return_counts=True)
-
     total_codes = model.quantizer.num_embeddings
-    used_codes = len(unique)
+    num_levels = getattr(model.quantizer, "num_levels", 1)
 
     print(f"\n{'='*60}")
-    print("Codebook Statistics")
+    print(f"Codebook Statistics ({num_levels} RVQ levels x {total_codes} codes)")
     print(f"{'='*60}")
-    print(f"  Total codebook size: {total_codes}")
-    print(f"  Codes used: {used_codes} ({used_codes/total_codes:.1%})")
-    print(f"  Dead codes: {total_codes - used_codes}")
-    print(f"  Most used code: index {unique[counts.argmax()]} (count={counts.max()})")
-    print(f"  Least used code: index {unique[counts.argmin()]} (count={counts.min()})")
-    print(f"  Mean usage per active code: {counts.mean():.1f}")
-    print(f"  Std usage: {counts.std():.1f}")
+
+    stacked = np.concatenate([idx.reshape(idx.shape[0], -1) for idx in all_indices], axis=0)
+    if stacked.ndim == 1:
+        stacked = stacked[:, None]
+
+    for level in range(stacked.shape[1]):
+        level_idx = stacked[:, level]
+        unique, counts = np.unique(level_idx, return_counts=True)
+        used = len(unique)
+        print(
+            f"  Level {level}: {used}/{total_codes} active ({used/total_codes:.1%}), "
+            f"dead={total_codes - used}, mean={counts.mean():.1f}, std={counts.std():.1f}"
+        )
 
 
 def main():
@@ -137,6 +141,7 @@ def main():
     model = MeshVQVAE(
         latent_dim=saved_args.get("latent_dim", 128),
         num_embeddings=saved_args.get("num_embeddings", 512),
+        num_vq_levels=saved_args.get("num_vq_levels", 1),
         commitment_cost=saved_args.get("commitment_cost", 0.25),
         warmup_epochs=0,
     ).to(device)

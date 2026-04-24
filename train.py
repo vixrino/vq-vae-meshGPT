@@ -108,6 +108,7 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--latent_dim", type=int, default=128)
     parser.add_argument("--num_embeddings", type=int, default=512)
+    parser.add_argument("--num_vq_levels", type=int, default=3, help="Number of residual VQ levels")
     parser.add_argument("--commitment_cost", type=float, default=0.25)
     parser.add_argument("--warmup_epochs", type=int, default=30)
     parser.add_argument("--max_faces", type=int, default=800)
@@ -136,6 +137,7 @@ def main():
     model = MeshVQVAE(
         latent_dim=args.latent_dim,
         num_embeddings=args.num_embeddings,
+        num_vq_levels=args.num_vq_levels,
         commitment_cost=args.commitment_cost,
         warmup_epochs=args.warmup_epochs,
     ).to(device)
