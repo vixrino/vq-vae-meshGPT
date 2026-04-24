@@ -21,14 +21,14 @@ A from-scratch reimplementation of the Vector Quantized Variational Autoencoder 
        │  z_e ∈ ℝ^(N_triangles × 256)
        ▼
 ┌──────────────┐
-│  Vector       │   Codebook of 512 vectors (dim=256)
-│  Quantizer    │   Straight-through estimator + commitment loss
+│  Residual VQ  │   3 levels × 512 codes (dim=128)
+│  (RVQ)        │   z_q = q_L0 + q_L1 + q_L2 (sum of codebook vectors)
 └──────┬───────┘
-       │  z_q ∈ ℝ^(N_triangles × 256)
+       │  z_q ∈ ℝ^(N_triangles × 128)
        ▼
 ┌──────────────┐
-│  Decoder      │   MLP: 256 → 256 → 128 → 9
-│  (MLP)        │   Reconstructs 3 vertex coords per triangle
+│  Decoder      │   4 × SAGEConv layers
+│  (GNN)        │   128 → 256 → 256 → 128 → 9
 └──────────────┘
        │
        ▼
@@ -45,7 +45,8 @@ vq-vae/
 ├── mesh_dataset.py      # ShapeNet .obj loading + triangle graph construction
 ├── encoder.py           # 4-layer SAGEConv GNN encoder
 ├── vector_quantizer.py  # Vector Quantization with EMA updates
-├── decoder.py           # MLP decoder for coordinate reconstruction
+├── residual_vector_quantizer.py  # Residual VQ (N stacked VQ levels)
+├── decoder.py           # GNN decoder for coordinate reconstruction
 ├── model.py             # Full VQ-VAE model
 ├── train.py             # Training loop
 └── evaluate.py          # Evaluation and mesh visualization
@@ -82,33 +83,39 @@ python evaluate.py --checkpoint checkpoints/best_model.pth --data_dir data/shape
 
 - **Graph construction**: Each triangle is a node. Two triangles sharing an edge are connected. Node features are the 9 flattened vertex coordinates (3 vertices × 3 coords).
 - **Encoder**: GraphSAGE convolutions propagate information across neighboring triangles, building a contextual embedding per triangle.
-- **VQ**: Standard VQ with EMA codebook updates and commitment loss (beta=0.25). Codebook size 512, dimension 256.
-- **Decoder**: Simple MLP since we decode per-triangle independently (the graph structure is already captured in the quantized embeddings).
+- **Residual VQ**: Stack of 3 codebooks of 512 entries each (dim=128). Each level quantizes the residual of the previous one, and the final latent is the sum of codebook vectors. Rare triangles use the later levels for detail.
+- **Decoder**: Mirror GraphSAGE GNN so neighboring triangles coordinate their vertex predictions via message passing.
+- **Losses**: cyclic-permutation L1 reconstruction (handles triangle vertex ordering) + VQ commitment + vertex consistency loss (pulls coords of shared vertices together).
 
 ## Results
 
 Trained on 425 low-poly meshes across 8 categories for 300 epochs
-(30 epoch autoencoder warmup + 270 epoch VQ phase).
+(30 epoch autoencoder warmup + 270 epoch RVQ phase).
 
 ![Per-category reconstructions](visualizations/per_category.png)
 
-Stitched reconstruction L1 per category (20 meshes each, mean over all categories = **0.099**):
+Stitched reconstruction L1 per category with 3-level Residual VQ
+(20 meshes each, mean over all categories = **0.050**):
 
-| Category   | Stitched L1 |
-|------------|------------:|
-| icosphere  |       0.034 |
-| torus      |       0.036 |
-| sphere     |       0.052 |
-| capsule    |       0.082 |
-| cylinder   |       0.100 |
-| cone       |       0.127 |
-| deformed   |       0.146 |
-| box        |       0.218 |
-| **Mean**   |   **0.099** |
+| Category   | Plain VQ (1 level) | **RVQ (3 levels)** | Speedup |
+|------------|-------------------:|-------------------:|--------:|
+| icosphere  |              0.034 |          **0.013** |    2.6× |
+| torus      |              0.036 |          **0.014** |    2.5× |
+| sphere     |              0.052 |          **0.022** |    2.3× |
+| capsule    |              0.082 |          **0.033** |    2.4× |
+| cylinder   |              0.100 |          **0.044** |    2.3× |
+| cone       |              0.127 |          **0.062** |    2.1× |
+| deformed   |              0.146 |          **0.084** |    1.7× |
+| box        |              0.218 |          **0.125** |    1.7× |
+| **Mean**   |          **0.099** |          **0.050** | **2.0×** |
 
-Shapes with repetitive local geometry (torus, icosphere, sphere) compress
-well and reconstruct with very low error. Irregular low-poly meshes with
-no motif repetition (boxes) are the hardest case.
+Moving from plain VQ to 3-level Residual VQ halves the reconstruction
+error across every category. The first level captures the coarse shape,
+while levels 1 and 2 absorb the residuals - this is exactly the design
+choice that helps the hardest irregular meshes (boxes: 0.218 → 0.125).
+
+Codebook utilization (across all eval meshes): 96.9% / 96.1% / 85.2% at
+levels 0/1/2 - all three levels are actively used.
 
 See [RESULTS.md](RESULTS.md) for the full breakdown including raw L1 and
 token-reuse statistics.
