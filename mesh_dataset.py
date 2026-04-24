@@ -33,16 +33,27 @@ def normalize_vertices(vertices: np.ndarray) -> np.ndarray:
     return vertices
 
 
+def normalize_triangle_vertex_order(tri_coords: np.ndarray) -> np.ndarray:
+    """
+    Sort the 3 vertices of each triangle in lexicographic order (x, then y, then z).
+
+    This ensures that the same geometric triangle always produces the same 9D
+    representation regardless of original vertex winding. Critical for the
+    decoder to learn a consistent mapping.
+    """
+    triangles = tri_coords.reshape(-1, 3, 3)
+    for i in range(len(triangles)):
+        order = np.lexsort((triangles[i][:, 2], triangles[i][:, 1], triangles[i][:, 0]))
+        triangles[i] = triangles[i][order]
+    return triangles.reshape(-1, 9)
+
+
 def build_triangle_graph(mesh: trimesh.Trimesh) -> Data:
     """
     Convert a triangle mesh into a PyG graph.
 
     Each triangle → one node with 9D features (3 vertices × 3 coords, flattened).
     Two triangles sharing an edge → connected by an undirected edge in the graph.
-
-    Also builds shared_vertex_pairs: for each pair of triangles sharing a vertex,
-    records which local vertex index (0,1,2) in each triangle corresponds to
-    the same global vertex. Used for vertex consistency loss.
     """
     vertices = normalize_vertices(mesh.vertices.copy())
     faces = mesh.faces
