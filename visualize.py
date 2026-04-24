@@ -3,6 +3,10 @@ Visualization of VQ-VAE reconstruction quality.
 
 Side-by-side 3D plots of original vs reconstructed meshes,
 codebook usage histogram, and token assignment maps.
+
+Includes post-processing that stitches shared vertices by averaging
+predictions, producing watertight reconstructions without needing
+a training loss.
 """
 
 import argparse
@@ -17,17 +21,41 @@ from mesh_dataset import MeshDataset, build_triangle_graph, load_mesh, normalize
 from model import MeshVQVAE
 
 
-def plot_triangles(ax, coords_9d: np.ndarray, title: str, color: str = "skyblue", token_indices: np.ndarray | None = None):
+def stitch_vertices(recon_9d: np.ndarray, faces: np.ndarray) -> np.ndarray:
     """
-    Plot triangles in 3D from 9D flattened coordinates.
+    Post-process reconstruction by averaging shared vertex predictions.
+
+    Each triangle independently predicts 3 vertex positions. When triangles
+    share a vertex (same global vertex index), we average all their predictions
+    for that vertex, then rebuild the 9D representation.
 
     Args:
-        ax: matplotlib 3D axis
-        coords_9d: [N, 9] array of triangle coordinates
-        title: plot title
-        color: face color (ignored if token_indices provided)
-        token_indices: optional [N] array of codebook indices for coloring
+        recon_9d: [N, 9] raw reconstructed coordinates per triangle
+        faces: [N, 3] original face indices (global vertex IDs)
+
+    Returns:
+        [N, 9] stitched coordinates where shared vertices are consistent
     """
+    recon_tris = recon_9d.reshape(-1, 3, 3)
+    num_vertices = faces.max() + 1
+
+    vertex_sum = np.zeros((num_vertices, 3), dtype=np.float64)
+    vertex_count = np.zeros(num_vertices, dtype=np.float64)
+
+    for tri_idx, face in enumerate(faces):
+        for local_idx, global_vid in enumerate(face):
+            vertex_sum[global_vid] += recon_tris[tri_idx, local_idx]
+            vertex_count[global_vid] += 1
+
+    vertex_count = np.maximum(vertex_count, 1)
+    avg_vertices = vertex_sum / vertex_count[:, None]
+
+    stitched = avg_vertices[faces].reshape(-1, 9)
+    return stitched.astype(np.float32)
+
+
+def plot_triangles(ax, coords_9d: np.ndarray, title: str, color: str = "skyblue", token_indices: np.ndarray | None = None):
+    """Plot triangles in 3D from 9D flattened coordinates."""
     triangles = coords_9d.reshape(-1, 3, 3)
 
     if token_indices is not None:
@@ -59,30 +87,36 @@ def visualize_reconstruction(
     device: torch.device,
     save_path: str | None = None,
 ):
-    """Plot original vs reconstructed mesh side by side."""
+    """Plot original, raw reconstruction, stitched reconstruction, and token map."""
     mesh = load_mesh(mesh_path)
     graph = build_triangle_graph(mesh)
+    faces = mesh.faces
     graph = graph.to(device)
 
     out = model(graph)
 
     original = graph.y.cpu().numpy()
-    reconstructed = out["recon"].cpu().numpy()
+    raw_recon = out["recon"].cpu().numpy()
+    stitched_recon = stitch_vertices(raw_recon, faces)
     indices = out["indices"].cpu().numpy()
 
-    l1 = np.abs(original - reconstructed).mean()
+    raw_l1 = np.abs(original - raw_recon).mean()
+    stitched_l1 = np.abs(original - stitched_recon).mean()
     unique_codes = len(np.unique(indices))
 
-    fig = plt.figure(figsize=(18, 6))
+    fig = plt.figure(figsize=(24, 6))
 
-    ax1 = fig.add_subplot(131, projection="3d")
+    ax1 = fig.add_subplot(141, projection="3d")
     plot_triangles(ax1, original, f"Original\n({len(original)} triangles)")
 
-    ax2 = fig.add_subplot(132, projection="3d")
-    plot_triangles(ax2, reconstructed, f"Reconstructed\nL1={l1:.4f}")
+    ax2 = fig.add_subplot(142, projection="3d")
+    plot_triangles(ax2, raw_recon, f"Raw Recon\nL1={raw_l1:.4f}", color="salmon")
 
-    ax3 = fig.add_subplot(133, projection="3d")
-    plot_triangles(ax3, original, f"Token Map\n({unique_codes} unique codes)", token_indices=indices)
+    ax3 = fig.add_subplot(143, projection="3d")
+    plot_triangles(ax3, stitched_recon, f"Stitched Recon\nL1={stitched_l1:.4f}", color="lightgreen")
+
+    ax4 = fig.add_subplot(144, projection="3d")
+    plot_triangles(ax4, original, f"Token Map\n({unique_codes} unique codes)", token_indices=indices)
 
     name = os.path.basename(mesh_path)
     fig.suptitle(f"{name}", fontsize=13, y=1.02)
@@ -95,7 +129,7 @@ def visualize_reconstruction(
         plt.show()
 
     plt.close(fig)
-    return l1, unique_codes
+    return stitched_l1, unique_codes
 
 
 @torch.no_grad()
@@ -163,31 +197,33 @@ def visualize_grid(
     n_samples: int = 8,
     save_path: str | None = None,
 ):
-    """Grid of original vs reconstructed meshes."""
+    """Grid of original vs stitched reconstructed meshes."""
     samples = []
     for i in range(len(dataset)):
         if len(samples) >= n_samples:
             break
         graph = dataset[i]
         if graph is not None:
-            samples.append((dataset.file_paths[i], graph))
+            mesh = load_mesh(dataset.file_paths[i])
+            samples.append((dataset.file_paths[i], graph, mesh.faces))
 
     n = len(samples)
     fig = plt.figure(figsize=(6 * 2, 4 * n))
 
-    for row, (path, graph) in enumerate(samples):
+    for row, (path, graph, faces) in enumerate(samples):
         graph = graph.to(device)
         out = model(graph)
 
         original = graph.y.cpu().numpy()
-        reconstructed = out["recon"].cpu().numpy()
-        l1 = np.abs(original - reconstructed).mean()
+        raw_recon = out["recon"].cpu().numpy()
+        stitched = stitch_vertices(raw_recon, faces)
+        l1 = np.abs(original - stitched).mean()
 
         ax1 = fig.add_subplot(n, 2, row * 2 + 1, projection="3d")
         plot_triangles(ax1, original, f"Original: {os.path.basename(path)}")
 
         ax2 = fig.add_subplot(n, 2, row * 2 + 2, projection="3d")
-        plot_triangles(ax2, reconstructed, f"Recon (L1={l1:.3f})", color="salmon")
+        plot_triangles(ax2, stitched, f"Stitched (L1={l1:.3f})", color="lightgreen")
 
     plt.tight_layout()
 
@@ -217,9 +253,8 @@ def main():
     model = MeshVQVAE(
         latent_dim=saved_args.get("latent_dim", 128),
         num_embeddings=saved_args.get("num_embeddings", 512),
-        commitment_cost=saved_args.get("commitment_cost", 1.0),
-        diversity_weight=saved_args.get("diversity_weight", 0.1),
-        consistency_weight=saved_args.get("consistency_weight", 1.0),
+        commitment_cost=saved_args.get("commitment_cost", 0.25),
+        warmup_epochs=0,
     ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])
