@@ -1,46 +1,41 @@
 """
-MLP decoder that reconstructs triangle vertex coordinates
-from quantized embeddings.
+Graph Neural Network decoder for triangle mesh reconstruction.
 
-Each triangle is decoded independently — the graph context
-is already captured by the GNN encoder + VQ codebook.
+Mirror architecture of the encoder: uses SAGEConv layers so each triangle's
+reconstruction is informed by its neighbors, producing consistent shared
+vertex predictions without post-processing.
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import SAGEConv
 
 
-class MLPDecoder(nn.Module):
+class GraphDecoder(nn.Module):
     """
-    Decodes quantized embeddings back to 9D triangle coordinates
-    (3 vertices × 3 coordinates).
+    GNN decoder that reconstructs 9D triangle coordinates using
+    neighborhood context via message passing.
 
-    Architecture:
-        Linear(latent → 256) + ReLU + LayerNorm
-        Linear(256 → 128)    + ReLU + LayerNorm
-        Linear(128 → 9)      + Tanh (vertices are in [-1, 1])
+    Architecture mirrors the encoder:
+        latent_dim → 256 → 256 → 128 → 9
     """
 
     def __init__(self, latent_dim: int = 128, out_channels: int = 9):
         super().__init__()
 
-        self.network = nn.Sequential(
-            nn.Linear(latent_dim, 256),
-            nn.ReLU(),
-            nn.LayerNorm(256),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.LayerNorm(128),
-            nn.Linear(128, out_channels),
-            nn.Tanh(),
-        )
+        self.conv1 = SAGEConv(latent_dim, 256)
+        self.conv2 = SAGEConv(256, 256)
+        self.conv3 = SAGEConv(256, 128)
+        self.conv4 = SAGEConv(128, out_channels)
 
-    def forward(self, z_q: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            z_q: Quantized embeddings [N, latent_dim]
+        self.norm1 = nn.LayerNorm(256)
+        self.norm2 = nn.LayerNorm(256)
+        self.norm3 = nn.LayerNorm(128)
 
-        Returns:
-            coords: Reconstructed triangle coords [N, 9]
-        """
-        return self.network(z_q)
+    def forward(self, z: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        x = F.relu(self.norm1(self.conv1(z, edge_index)))
+        x = F.relu(self.norm2(self.conv2(x, edge_index)))
+        x = F.relu(self.norm3(self.conv3(x, edge_index)))
+        x = self.conv4(x, edge_index)
+        return x
