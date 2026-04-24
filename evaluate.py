@@ -16,13 +16,14 @@ import trimesh
 
 from mesh_dataset import MeshDataset, build_triangle_graph, load_mesh, normalize_vertices
 from model import MeshVQVAE
+from visualize import stitch_vertices
 
 
 @torch.no_grad()
 def evaluate_mesh(
     model: MeshVQVAE, mesh_path: str, device: torch.device
 ) -> dict:
-    """Evaluate reconstruction quality on a single mesh."""
+    """Evaluate reconstruction quality on a single mesh with stitched vertices."""
     mesh = load_mesh(mesh_path)
     graph = build_triangle_graph(mesh)
     graph = graph.to(device)
@@ -30,10 +31,11 @@ def evaluate_mesh(
     out = model(graph)
 
     original = graph.y.cpu().numpy()
-    reconstructed = out["recon"].cpu().numpy()
+    raw_recon = out["recon"].cpu().numpy()
+    stitched = stitch_vertices(raw_recon, mesh.faces)
 
-    l1_error = np.abs(original - reconstructed).mean()
-    l2_error = np.sqrt(((original - reconstructed) ** 2).sum(axis=1)).mean()
+    l1_error = np.abs(original - stitched).mean()
+    l2_error = np.sqrt(((original - stitched) ** 2).sum(axis=1)).mean()
 
     indices = out["indices"].cpu()
     unique_codes = torch.unique(indices).shape[0]
@@ -46,7 +48,7 @@ def evaluate_mesh(
         "num_unique_codes": int(unique_codes),
         "total_codes_used": int(len(indices)),
         "original": original,
-        "reconstructed": reconstructed,
+        "reconstructed": stitched,
         "indices": indices.numpy(),
         "faces": mesh.faces,
         "original_vertices": normalize_vertices(mesh.vertices.copy()),
@@ -56,12 +58,7 @@ def evaluate_mesh(
 def export_reconstructed_obj(
     result: dict, output_path: str
 ) -> None:
-    """
-    Export the reconstructed mesh as .obj.
-
-    Reassembles vertices from the per-triangle 9D predictions,
-    deduplicating shared vertices with a tolerance.
-    """
+    """Export the reconstructed mesh as .obj using stitched vertices."""
     recon_coords = result["reconstructed"].reshape(-1, 3, 3)
     faces = result["faces"]
 
@@ -140,9 +137,8 @@ def main():
     model = MeshVQVAE(
         latent_dim=saved_args.get("latent_dim", 128),
         num_embeddings=saved_args.get("num_embeddings", 512),
-        commitment_cost=saved_args.get("commitment_cost", 1.0),
-        diversity_weight=saved_args.get("diversity_weight", 0.1),
-        consistency_weight=saved_args.get("consistency_weight", 1.0),
+        commitment_cost=saved_args.get("commitment_cost", 0.25),
+        warmup_epochs=0,
     ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])
